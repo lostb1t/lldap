@@ -1,5 +1,5 @@
 # Build image
-FROM rust:alpine3.16 AS chef
+FROM rust:alpine3.18 AS chef
 
 RUN set -x \
     # Add user
@@ -41,7 +41,7 @@ RUN cargo build --release -p lldap -p lldap_migration_tool -p lldap_set_password
     && ./app/build.sh
 
 # Final image
-FROM alpine:3.16
+FROM alpine:3.18
 
 ENV GOSU_VERSION 1.14
 # Fetch gosu from git

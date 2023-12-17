@@ -20,13 +20,14 @@ use crate::{
         UserReadableBackendHandler, ValidationResults,
     },
 };
+use actix_http::body::MessageBody;
 use anyhow::Result;
 use ldap3_proto::proto::{
     LdapAddRequest, LdapBindCred, LdapBindRequest, LdapBindResponse, LdapCompareRequest,
     LdapDerefAliases, LdapExtendedRequest, LdapExtendedResponse, LdapFilter, LdapModify,
     LdapModifyRequest, LdapModifyType, LdapOp, LdapPartialAttribute, LdapPasswordModifyRequest,
     LdapResult as LdapResultOp, LdapResultCode, LdapSearchRequest, LdapSearchResultEntry,
-    LdapSearchScope,
+    LdapSearchScope, OID_PASSWORD_MODIFY, OID_WHOAMI
 };
 use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
@@ -183,8 +184,9 @@ fn root_dse_response(base_dn: &str) -> LdapOp {
             },
             LdapPartialAttribute {
                 atype: "supportedExtension".to_string(),
-                // Password modification extension.
-                vals: vec![b"1.3.6.1.4.1.4203.1.11.1".to_vec()],
+                vals: vec![
+                    OID_PASSWORD_MODIFY.try_into_bytes().unwrap().to_vec(), 
+                    OID_WHOAMI.try_into_bytes().unwrap().to_vec()],
             },
             LdapPartialAttribute {
                 atype: "supportedControl".to_string(),
@@ -392,15 +394,32 @@ impl<Backend: BackendHandler + LoginHandler + OpaqueHandler> LdapHandler<Backend
     }
 
     async fn do_extended_request(&mut self, request: &LdapExtendedRequest) -> Vec<LdapOp> {
-        match LdapPasswordModifyRequest::try_from(request) {
-            Ok(password_request) => self
-                .do_password_modification(&password_request)
-                .await
-                .unwrap_or_else(|e: LdapError| vec![make_extended_response(e.code, e.message)]),
-            Err(_) => vec![make_extended_response(
-                LdapResultCode::UnwillingToPerform,
-                format!("Unsupported extended operation: {}", &request.name),
-            )],
+        match request.name.as_str() {
+            OID_WHOAMI => {
+                // dbg!(&self.ldap_info.base_dn_str);
+                vec![make_extended_response(
+                    LdapResultCode::Success,
+                    self.ldap_info.base_dn_str.clone(),
+                )]
+            },
+            OID_PASSWORD_MODIFY => {
+                match LdapPasswordModifyRequest::try_from(request) {
+                    Ok(password_request) => self
+                        .do_password_modification(&password_request)
+                        .await
+                        .unwrap_or_else(|e: LdapError| vec![make_extended_response(e.code, e.message)]),
+                    Err(e) => vec![make_extended_response(
+                        LdapResultCode::Other,
+                        format!("Error while modifying the password: {:#?}", e),
+                    )],
+                }
+            },
+            _ => {
+                vec![make_extended_response(
+                    LdapResultCode::UnwillingToPerform,
+                    format!("Unsupported extended operation: {}", &request.name),
+                )]
+            },
         }
     }
 
@@ -510,6 +529,10 @@ impl<Backend: BackendHandler + LoginHandler + OpaqueHandler> LdapHandler<Backend
             if let LdapFilter::Present(attribute) = &request.filter {
                 if attribute.to_ascii_lowercase() == "objectclass" {
                     debug!("rootDSE request");
+                    // return Err(LdapError {
+                    //     code: LdapResultCode::UnwillingToPerform,
+                    //     message: r#"Unsupported group attribute for substring filter: "member""#.to_owned()
+                    // })
                     return Ok(vec![
                         root_dse_response(&self.ldap_info.base_dn_str),
                         make_search_success(),
